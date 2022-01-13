@@ -1,0 +1,145 @@
+package P3_BSW52; @ISA = ("RUNBPE");
+# ============================================================================
+# Name    :  P3_BSW52
+#
+# Purpose :  Use FTP to download BSWUSER52 files from AIUB (e.g. for $X/GEN)
+#
+# PARAMs  :
+#
+# Authors :  S Fuller
+# Created :  08-JAN-2022
+#
+# Changes :  
+#
+# ============================================================================
+use strict;
+use Net::FTP;
+use Class::Struct; 
+
+use lib $ENV{BPE};
+use lib "$ENV{X}/EXE";
+
+sub run{
+  my $bpe = shift;
+
+# Get Bernese Variables
+# -------------
+  my ($yyyy, $v_pcv, $v_satcrx, $v_satinf) =
+  $bpe->getKeys
+     ('$Y+0', 'V_PCV', 'V_SATCRX', 'V_SATINF');
+
+# If not using PCF variables (e.g. v_pcv, see above), provide some defaults here
+# my $v_pcv = "I14";
+# my $v_satcrx = "SAT_$yyyy.CRX";
+# my $v_satinf = "SATELLIT.I14";
+
+# Define data structure for use in FTP downloading
+# ---------
+struct( bswConfig => {
+  remote_folder => '$',
+  local_folder => '$',
+  files => '@'
+}); 
+
+# Setup FTP Server Variables
+# ---------
+my $ftp = '';
+my $codsvr = "ftp.aiub.unibe.ch";
+my $usr = "anonymous";
+my $pwd = "password";
+
+
+# Setup configs for downloading files from various remote/local folder combos
+# ---------
+my @myConfig;
+
+# Config for the /BSWUSER52/GEN folder, modify file list as needed.
+# Note: Do not modify the local folder, unless you have a non-default Bernese install.
+# Note: File will be downlaoded to $X/GEN with group/owner of the user who runes this script.
+push( @myConfig, bswConfig->new(
+  remote_folder => '/BSWUSER52/GEN',
+  local_folder => "$ENV{X}/GEN",
+  files => ["$v_satcrx.CRX", "$v_satinf.$v_pcv", "PCV_COD.$v_pcv", "$v_pcv.ATX"]
+));
+
+# Config for the /BSWUSER52/STA folder, moify the local folder and file list as needed.
+push( @myConfig, bswConfig->new(
+  remote_folder => '/BSWUSER52/STA',
+  local_folder => "$ENV{D}/REF52",
+  files => ['IGS.STA']
+));
+
+# Config for ....
+# Add additional configs for other folders in the BSWUSER52 folder if you wish
+
+
+# Begin FTP connection
+# =============
+
+# Establish connection
+print "Attempting to connect to $codsvr\n";
+$ftp = Net::FTP->new($codsvr)
+	or print "Cannot connect to $codsvr\n";
+
+# Login
+print "Authenticating..\n";
+$ftp->login($usr,$pwd)
+	or print "Cannot login to $codsvr\n", $ftp->message;
+
+# Set transfer mode to binary
+print "Setting binary transfer mode\n";#
+$ftp->binary() or print "Cannot set binary mode: $!";
+
+# Begin downloading files
+# ---------
+# Loop through the config items, setting folders and downloading files
+my $ret = '';
+foreach my $thisConfig (@myConfig) {
+  # Change the local directory
+  chdir $thisConfig->local_folder;
+  print "Changed local directory to " .  $thisConfig->local_folder . "\n";
+
+  # Change to the remote folder  
+  if ($ftp->cwd($thisConfig->remote_folder)) {
+    print "Changed remote folder to " . $thisConfig->remote_folder . "\n";
+
+    # Loop through the files required for this config
+    print "Commencing file download loop\n"; 
+    foreach my $thisFile (@{$thisConfig->files}) {
+      print "Checking: $thisFile \n";
+      $ret = update_BSWUSER52_File($ftp, $thisFile);
+    }
+  }
+}
+
+# Done. Terminate connection
+$ftp->quit();
+print "Disconnecting \n\n";
+
+sub update_BSWUSER52_File {
+  my ($ftp, $tryFile) = @_;
+  my $modRemote = 0;
+  my $modLocal = 0;
+
+  # Get file modification times  
+  $modRemote = $ftp->mdtm($tryFile);
+  $modLocal = (stat($tryFile))[9];
+
+  if ($modRemote > $modLocal) {
+    if($ftp->size($tryFile) > 0) {
+      print "Remote version is newer! Trying to download $tryFile\n";
+      $ftp->get($tryFile);
+      print "Success! Downloaded $tryFile\n";
+    } else {
+      print "Weird! Remote version newer, but has size of 0 bytes! :-( \n";
+      $tryFile = '';
+    }
+  } else {
+    print "Local version is newer! No action.\n";
+    $tryFile = '';
+  }
+  
+  return $tryFile;
+}
+
+}
