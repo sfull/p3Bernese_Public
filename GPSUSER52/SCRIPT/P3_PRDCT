@@ -1,0 +1,307 @@
+package P3_PRDCT;
+@ISA = ("RUNBPE");
+# ============================================================================
+#
+# Name    :  P3_PRDCT
+#
+# Purpose :  Use FTP to download IGS, CODE products needed for Bernese processing
+#
+# PARAMs  :
+#
+# Authors :  S Fuller
+# Created :  11-NOV-2020
+#
+# Changes :  
+#
+# ============================================================================
+use strict;
+use Switch;
+use Net::FTP;
+
+use lib $ENV{BPE};
+use lib "$ENV{X}/EXE";
+use bpe_util qw(prtMess);
+
+sub run{
+  my $bpe = shift;
+
+# Get Bernese Variables
+# -------------
+  my ($wwwwd,$wwww, $yymm,$mm,$yyyy, $yy, $v_b) =
+  $bpe->getKeys
+     ('$WD+0','$W+0','$M+0','$M','$Y+0', '$Y', 'V_B');
+
+# Variables
+# ---------
+my $ftp = '';
+my $usr = "anonymous";
+my $pwd = "password";
+
+# IGS server and remote folder details
+# You can add new server & combos to the hash if required.
+my %igsSvrs = (
+  'igs.ensg.igs.fr', "/pub/igs/products/${wwww}",
+  'garner.ucsd.edu', "/products/${wwww}"
+);
+
+# CODE server and remote folder details
+my $codsvr = "ftp.aiub.unibe.ch";
+my $coddir = "/CODE/$yyyy";  # Remote folder for "final" CODE products
+my $coddirrp = "/CODE";      # Remote folder for "rapid, ultra" CODE products
+
+# Desired output file names (IGS Products)
+my $igssp3 = $v_b.$wwwwd.".SP3.Z";
+my $iglsp3 = "IGL$wwwwd.SP3.Z";
+my $igserp = $v_b.$wwww."7.ERP.Z";
+my $igsclk = $v_b.$wwwwd.".CLK.Z";
+my $p1c1   = "P1C1$yymm.DCB.Z";
+my $p1p2   = "P1P2$yymm.DCB.Z";
+my $codion = "COD$wwwwd.ION.Z";
+my $codionrp = "COD$wwwwd.ION_R";
+my $p1c1rp = "P1C1.DCB";
+my $p1p2rp = "P1P2.DCB";
+
+# Local folders to store downloaded files in
+my $igsldr = "$ENV{D}/$v_b/$wwww/";
+my $codldr = "$ENV{D}/BSW52";
+
+# Utiliyt variables
+my $wd = substr($wwwwd, 4, 1);
+my $ret = '';
+my @igsPrdcts = ("sp3","erp","clk");
+my @igsPrdctsDone = ();
+
+
+# IGS Products
+# ------------
+print "\n\nGetting IGS Products\n";
+print "--------------------\n\n";
+
+# Check that the local products directory exists, if not then create it.
+if(!(-d $igsldr)) {
+  mkdir $igsldr;
+  prtMess($bpe, "IGS Products directory ${igsldr} created.");
+}
+
+# Change local directory
+chdir $igsldr;
+print "Changed local directory to Bernese datapool ($igsldr)..\n";
+
+# Loop through the available IGS FTP servers until we have all required products.
+my @keys = keys %igsSvrs;
+foreach my $igssvr (@keys) {
+  print "Server is: $igssvr, Path is: $igsSvrs{$igssvr}\n";
+
+  # Have we got all the products we need?
+  if (scalar(@igsPrdctsDone) != 3) { print "Need to get products!\n"; }
+
+  print "Connecting to $igssvr..\n";
+
+  # Set up connection
+  $ftp = Net::FTP->new($igssvr, Passive => 1, Debug => 0);
+
+  if ($ftp == '') {
+    print "Cannot connect to $igssvr\n";
+    next;
+  }
+  print "Authenticating..\n";
+
+  # Login
+  $ftp->login($usr,$pwd)
+    or print "Cannot login to $igssvr\n", $ftp->message;
+
+  print "Logged in..\n";
+
+  # Set transfer mode to binary
+  $ftp->binary() or print "Cannot set binary mode: $!";
+
+  # Change to Products directory
+  my $gpsdir = $igsSvrs{$igssvr};
+  if ($ftp->cwd($gpsdir))
+  {
+    print "Changed to GPS products directory ($gpsdir)..\n";
+    foreach my $product (@igsPrdcts)
+    {
+      $ret = get_IGS_Product($ftp, $wwwwd, $product);
+      if ($ret ne "") {
+        # Rename file to its appropriate "Final" filename.
+        switch ($product) {
+          case "sp3" { rename $igsldr."/".$ret, $igsldr."/".$igssp3; }
+          case "erp" { rename $igsldr."/".$ret, $igsldr."/".$igserp; }
+          case "clk" { rename $igsldr."/".$ret, $igsldr."/".$igsclk; }
+          else { print "Unrecognised product\n"; }
+        }
+        push(@igsPrdctsDone, $product);
+      }
+    }
+  }
+  else
+  {
+    print "Unable to change into GPS products directory $gpsdir\n", $ftp->message;
+  }
+
+  # Terminate connection
+  $ftp->quit();
+  print "Disconnecting from $igssvr..\n\n\n";
+}
+
+# Have we got all the products we need?
+if (scalar(@igsPrdctsDone) == 3) { print "We have all the products!\n"; }
+
+# CODE Products
+# =============
+
+# Set up connection
+$ftp = Net::FTP->new($codsvr)
+	or print "Cannot connect to $codsvr\n";
+
+print "Authenticating..\n";
+
+# Login
+$ftp->login($usr,$pwd)
+	or print "Cannot login to $codsvr\n", $ftp->message;
+
+print "Logged in..\n";
+
+# Set transfer mode to binary
+$ftp->binary() or print "Cannot set binary mode: $!";
+
+# Change the local directory
+chdir $codldr;
+print "Changed local directory to Bernese datapool ($codldr)..\n";
+
+# Change to CODE Finals directory
+if ($ftp->cwd($coddir)) {
+  
+  print "Changed to CODE products directory ($coddir)..\n";
+  
+  # Get P1C1 DCBs
+  $ret = get_CODE_DCB($ftp, $yymm, "P1C1");
+  if ( index($ret, ".Z") == -1) {
+    rename $codldr."/".$ret, $codldr."/P1C1".$yymm.".DCB";
+    print "File $ret downloaded and renamed..\n";
+  }
+  
+  # Get P1P2 DCBs
+  $ftp->cwd($coddir);
+  $ret = get_CODE_DCB($ftp, $yymm, "P1P2");
+  if ( (index($ret, ".Z") == -1) && ($ret ne "") ) {
+    rename $codldr."/".$ret, $codldr."/P1P2".$yymm.".DCB";
+    print "File $ret downloaded and renamed..\n";
+  }
+}
+
+# Change to CODE Finals directory
+if ($ftp->cwd($coddir)) {
+  
+  print "Changed to CODE products directory ($coddir)..\n";
+  
+  # Get the ION product.
+  $ret = get_CODE_ION($ftp, $wwwwd);
+  if ( (index($ret, ".Z") == -1) && ($ret ne "") ) {
+    rename $codldr."/".$ret, $codldr."/COD".$wwwwd.".ION";
+    print "File $ret downloaded and renamed..\n";
+  }
+}
+
+# Terminate connection
+$ftp->quit();
+print "Disconnecting from $codsvr..\n\n\n";
+
+sub get_IGS_Product {
+  my ($ftp, $wwwwd, $product) = @_;
+  my $tryFile = "";
+  my $level = 0;
+  
+  while ($level < 6) {
+    # Construct the file name to try
+    switch ($level) {
+      case 0 { $tryFile = "igs".$wwwwd.".".$product.".Z"; }
+      case 1 { $tryFile = "igr".$wwwwd.".".$product.".Z"; }
+      case 2 { $tryFile = "igu".$wwwwd."_18.".$product.".Z"; }
+      case 3 { $tryFile = "igu".$wwwwd."_12.".$product.".Z"; }
+      case 4 { $tryFile = "igu".$wwwwd."_06.".$product.".Z"; }
+      case 5 { $tryFile = "igu".$wwwwd."_00.".$product.".Z"; }
+      else { last; }
+    }
+
+    print "Checking remote host for: $tryFile\n";
+    # Attempt download
+    if($ftp->size($tryFile) > 0) {
+      print "Found! Trying to download: $tryFile\n";
+      $ftp->get($tryFile);
+      print "Success! $tryFile downloaded..\n";
+      last;
+    } else {
+      $level = $level + 1;
+      $tryFile = "";
+    }
+  }
+  
+  return $tryFile;
+  
+}
+
+sub get_CODE_DCB {
+  my ($ftp, $yymm, $type) = @_;
+  my $tryFile = $type.$yymm.".DCB.Z";
+  
+  print "Checking for: $tryFile\n";
+  # Attempt download
+  if($ftp->size($tryFile) > 0) {
+    print "Found! Trying to download: $tryFile\n";
+    $ftp->get($tryFile);
+    print "Success! $tryFile downloaded..\n";
+	return $tryFile;
+  }
+  
+  # Final DCB not availabe, try for rapid
+  if ($ftp->cdup()) {
+    $tryFile = $type.".DCB";
+	print "Checking for: $tryFile\n";
+    # Attempt download
+    if($ftp->size($tryFile) > 0) {
+      print "Found! Trying to download: $tryFile\n";
+      $ftp->get($tryFile);
+      print "Success! $tryFile downloaded..\n";
+	  return $tryFile;
+	}
+  }
+	
+  # If here, not successful.
+  return "";
+  
+}
+
+sub get_CODE_ION {
+  my ($ftp, $wwwwd) = @_;
+  my $tryFile = "";
+  my $level = 0;
+  
+  while ($level < 3) {
+    # Construct the file name to try
+	switch ($level) {
+	  case 0 { $tryFile = "COD".$wwwwd.".ION.Z"; }
+	  case 1 { $tryFile = "COD".$wwwwd.".ION_R"; }
+	  case 2 { $tryFile = "COD".$wwwwd.".ION_P"; }
+	  else { last; }
+	}
+	
+    print "Checking for: $tryFile\n";
+    # Attempt download
+    if($ftp->size($tryFile) > 0) {
+      print "Found! Trying to download: $tryFile\n";
+      $ftp->get($tryFile);
+      print "Success! $tryFile downloaded..\n";
+	  last;
+    } else {
+      $level = $level + 1;
+	  # The rapid and predicted files ($level > 0) are in a different folder...
+	  if ($level == 1) { $ftp->cdup(); }
+ 	  $tryFile = "";
+	}
+  }
+  return $tryFile;
+}
+
+}
