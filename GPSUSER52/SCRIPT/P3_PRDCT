@@ -11,12 +11,16 @@ package P3_PRDCT;
 # Authors :  S Fuller
 # Created :  11-NOV-2020
 #
-# Changes :  
+# Changes :  See github repo.
 #
 # ============================================================================
 use strict;
 use Switch;
 use Net::FTP;
+use HTTP::Cookies;
+use LWP::UserAgent;
+use MIME::Base64;
+
 
 use lib $ENV{BPE};
 use lib "$ENV{X}/EXE";
@@ -34,15 +38,22 @@ sub run{
 # Variables
 # ---------
 my $ftp = '';
-my $usr = "anonymous";
-my $pwd = "password";
+my $client = '';
+my $usr = "your_CDDIS_username";
+my $pwd = "your_CDDIS_password";
+my $cookie_file = "CDDIS_Cookie.txt";
 
 # IGS server and remote folder details
 # You can add new server & combos to the hash if required.
 my %igsSvrs = (
-  'igs.ensg.igs.fr', "/pub/igs/products/${wwww}",
-  'garner.ucsd.edu', "/products/${wwww}"
+  'cddis.nasa.gov' => {"Protocol" => "HTTP", "Path" => "/archive/gnss/products/${wwww}/" }
 );
+
+#my %igsSvrs = (
+#  'cddis.nasa.gov' => {"Protocol" => "HTTP", "Path" => "/archive/gnss/products/${wwww}/" },
+#  'igs.ensg.igs.fr' => {"Protocol" => "FTP", "Path" => "/pub/igs/products/${wwww}/" },
+#  'garner.ucsd.edu' => {"Protocol" => "FTP", "Path" => "/products/${wwww}/" }
+#);
 
 # CODE server and remote folder details
 my $codsvr = "ftp.aiub.unibe.ch";
@@ -90,39 +101,92 @@ print "Changed local directory to Bernese datapool ($igsldr)..\n";
 # Loop through the available IGS FTP servers until we have all required products.
 my @keys = keys %igsSvrs;
 foreach my $igssvr (@keys) {
-  print "Server is: $igssvr, Path is: $igsSvrs{$igssvr}\n";
+  print "Server is: $igssvr, Path is: " . $igsSvrs{$igssvr}{"Path"} . "\n";
 
   # Have we got all the products we need?
   if (scalar(@igsPrdctsDone) != 3) { print "Need to get products!\n"; }
 
   print "Connecting to $igssvr..\n";
+  my $svrProtocol = $igsSvrs{$igssvr}{"Protocol"};
 
-  # Set up connection
-  $ftp = Net::FTP->new($igssvr, Passive => 1, Debug => 0);
+  # Establish connection 
+  if ($svrProtocol eq "FTP" ) {
+    $client = Net::FTP->new($igssvr, Passive => 1, Debug => 0);
+  } else {
+    # Setting up for a HTTP connection to CDDIS
+    # Original code taken from CDDIS Perl example.
+    #
+    # Setup user agent (client)
+    $client = LWP::UserAgent->new(
+      cookie_jar  => HTTP::Cookies->new(
+        file => $cookie_file,
+        ignore_discard => 1,
+        autosave => 1
+      )
+    );
+    # Disable SSL
+    $client->ssl_opts(verify_hostname => 0);
+    # Setup authentication handler
+    my $urs = 'urs.earthdata.nasa.gov';
+    my $credentials = encode_base64("$usr:$pwd", ""); 
+    $client->add_handler(
+        request_prepare => sub {
+            my($request, $ua, $h) = @_;
+            print "Providing Earthdata Login credentials\n"; 
+            $request->header(Authorization => "Basic $credentials");
+        },
+        m_host => $urs,
+        m_path_prefix => '/oauth/authorize'
+    );
+    # Setup handler for authentication refusals
+    $client->add_handler(
+      response_done => sub {
+        my($response, $ua, $h) = @_;
+        if ($response->code == 302 && $response->header('location') =~ /error=access_denied/) {
+          $response->code(403);
+          $response->message('Forbidden');
+          $response->content('You have not authorized the application providing this data.');
 
-  if ($ftp == '') {
+          # Pull out the client ID needed for the application approval URL
+
+          if ($response->request->uri =~ /client_id=([^&]+)/ ) {
+            $response->header('location' => "https://${urs}/approve_app?client_id=${1}");
+          }
+        }
+      },
+      m_host => $urs,
+      m_path_prefix => '/oauth/authorize'
+    );
+  }
+
+  if ($client eq '') {
     print "Cannot connect to $igssvr\n";
     next;
   }
-  print "Authenticating..\n";
 
-  # Login
-  $ftp->login($usr,$pwd)
-    or print "Cannot login to $igssvr\n", $ftp->message;
-
-  print "Logged in..\n";
-
-  # Set transfer mode to binary
-  $ftp->binary() or print "Cannot set binary mode: $!";
+  # Complete any protocol specific connection tasks (e.g. Login)
+  my $gpsdir = '';
+  if ($svrProtocol eq "FTP") {
+    # FTP Login
+    #$client->login($usr,$pwd)
+    $client->login("anonymous","password")
+      or print "Cannot login to $igssvr\n", $ftp->message;
+    # FTP transfer mode to binary
+    $client->binary() or print "Cannot set binary mode: $!";
+    print "FTP Connection Setup Complete!\n";
+    $gpsdir = $igsSvrs{$igssvr}{"Path"};
+  } else {
+    print "Trying for HTPP request \n";
+    $gpsdir = $igssvr . $igsSvrs{$igssvr}{"Path"};
+  }
+  
+  print "Remote path is: " . $gpsdir . "\n";
 
   # Change to Products directory
-  my $gpsdir = $igsSvrs{$igssvr};
-  if ($ftp->cwd($gpsdir))
-  {
-    print "Changed to GPS products directory ($gpsdir)..\n";
+#  my $gpsdir = $igsSvrs{$igssvr}{"Path"};
     foreach my $product (@igsPrdcts)
     {
-      $ret = get_IGS_Product($ftp, $wwwwd, $product);
+      $ret = get_IGS_Product($svrProtocol, $client, $gpsdir, $product, $wwwwd);
       if ($ret ne "") {
         # Rename file to its appropriate "Final" filename.
         switch ($product) {
@@ -134,15 +198,12 @@ foreach my $igssvr (@keys) {
         push(@igsPrdctsDone, $product);
       }
     }
-  }
-  else
-  {
-    print "Unable to change into GPS products directory $gpsdir\n", $ftp->message;
-  }
 
   # Terminate connection
-  $ftp->quit();
-  print "Disconnecting from $igssvr..\n\n\n";
+  if ($svrProtocol eq "FTP") {
+    $client->quit();
+    print "Disconnecting from $igssvr..\n\n\n";
+  }
 }
 
 # Have we got all the products we need?
@@ -151,68 +212,79 @@ if (scalar(@igsPrdctsDone) == 3) { print "We have all the products!\n"; }
 # CODE Products
 # =============
 
-# Set up connection
-$ftp = Net::FTP->new($codsvr)
-	or print "Cannot connect to $codsvr\n";
+# Set up connection, try at least three times, with 5 secs btw each attempt
+for (my $try = 0; $try <= 3; $try++) {
+  $ftp = Net::FTP->new($codsvr, Passive => 1, Debug => 0);
+  if ($ftp != '') {
+    print "Connected to " . $codsvr . "\n";
+    last;
+  }
+  print "Unable to connect to ${codsvr}. Trying again in 5 seconds\n";
+  sleep(5);
+}
 
-print "Authenticating..\n";
+if ($ftp != '') {
 
-# Login
-$ftp->login($usr,$pwd)
+  print "Authenticating..\n";
+
+  # Login
+  $ftp->login("anonymous", "password")
 	or print "Cannot login to $codsvr\n", $ftp->message;
 
-print "Logged in..\n";
+  print "Logged in..\n";
 
-# Set transfer mode to binary
-$ftp->binary() or print "Cannot set binary mode: $!";
+  # Set transfer mode to binary
+  $ftp->binary() or print "Cannot set binary mode: $!";
 
-# Change the local directory
-chdir $codldr;
-print "Changed local directory to Bernese datapool ($codldr)..\n";
+  # Change the local directory
+  chdir $codldr;
+  print "Changed local directory to Bernese datapool ($codldr)..\n";
 
-# Change to CODE Finals directory
-if ($ftp->cwd($coddir)) {
+  # Change to CODE Finals directory
+  if ($ftp->cwd($coddir)) {
+    print "Changed to CODE products directory ($coddir)..\n";
+    # Get P1C1 DCBs
+    $ret = get_CODE_DCB($ftp, $yymm, "P1C1");
+    if ( index($ret, ".Z") == -1) {
+      rename $codldr."/".$ret, $codldr."/P1C1".$yymm.".DCB";
+      print "File $ret downloaded and renamed..\n";
+    }
   
-  print "Changed to CODE products directory ($coddir)..\n";
-  
-  # Get P1C1 DCBs
-  $ret = get_CODE_DCB($ftp, $yymm, "P1C1");
-  if ( index($ret, ".Z") == -1) {
-    rename $codldr."/".$ret, $codldr."/P1C1".$yymm.".DCB";
-    print "File $ret downloaded and renamed..\n";
+    # Get P1P2 DCBs
+    $ftp->cwd($coddir);
+    $ret = get_CODE_DCB($ftp, $yymm, "P1P2");
+    if ( (index($ret, ".Z") == -1) && ($ret ne "") ) {
+      rename $codldr."/".$ret, $codldr."/P1P2".$yymm.".DCB";
+      print "File $ret downloaded and renamed..\n";
+    }
   }
+
+  # Change to CODE Finals directory
+  if ($ftp->cwd($coddir)) {
+    print "Changed to CODE products directory ($coddir)..\n";
   
-  # Get P1P2 DCBs
-  $ftp->cwd($coddir);
-  $ret = get_CODE_DCB($ftp, $yymm, "P1P2");
-  if ( (index($ret, ".Z") == -1) && ($ret ne "") ) {
-    rename $codldr."/".$ret, $codldr."/P1P2".$yymm.".DCB";
-    print "File $ret downloaded and renamed..\n";
+    # Get the ION product.
+    $ret = get_CODE_ION($ftp, $wwwwd);
+    if ( (index($ret, ".Z") == -1) && ($ret ne "") ) {
+      rename $codldr."/".$ret, $codldr."/COD".$wwwwd.".ION";
+      print "File $ret downloaded and renamed..\n";
+    }
   }
+
+  # Terminate connection
+  $ftp->quit();
+  print "Disconnecting from $codsvr..\n\n\n";
 }
-
-# Change to CODE Finals directory
-if ($ftp->cwd($coddir)) {
-  
-  print "Changed to CODE products directory ($coddir)..\n";
-  
-  # Get the ION product.
-  $ret = get_CODE_ION($ftp, $wwwwd);
-  if ( (index($ret, ".Z") == -1) && ($ret ne "") ) {
-    rename $codldr."/".$ret, $codldr."/COD".$wwwwd.".ION";
-    print "File $ret downloaded and renamed..\n";
-  }
+else
+{
+  print "Failed to connect to ${codsvr} after three attempts!!\n";
 }
-
-# Terminate connection
-$ftp->quit();
-print "Disconnecting from $codsvr..\n\n\n";
 
 sub get_IGS_Product {
-  my ($ftp, $wwwwd, $product) = @_;
+  my ($protocol, $client, $path, $product, $wwwwd) = @_;
   my $tryFile = "";
   my $level = 0;
-  
+
   while ($level < 6) {
     # Construct the file name to try
     switch ($level) {
@@ -225,17 +297,44 @@ sub get_IGS_Product {
       else { last; }
     }
 
-    print "Checking remote host for: $tryFile\n";
-    # Attempt download
-    if($ftp->size($tryFile) > 0) {
-      print "Found! Trying to download: $tryFile\n";
-      $ftp->get($tryFile);
-      print "Success! $tryFile downloaded..\n";
-      last;
-    } else {
+    # Different protocols require different execution of "get this file".
+    if ($protocol eq "FTP") {
+      print "FTP: Checking remote host for: ${path}${tryFile}\n";
+      # Attempt download
+      if ($client->size($path . $tryFile) > 0) {
+        print "FTP: Found! Trying to download: $tryFile\n";
+        $client->get($path . $tryFile);
+        print "FTP: Success! ${path}${tryFile} downloaded.\n";
+        last;
+      } else {
+        print "FTP: $tryFile does not exist or has size of zero\n";
+        $level = $level + 1;
+        $tryFile = "";
+      }
+    }  
+
+    if ($protocol eq "HTTP") {
+      print "Checking remote host for: $path$tryFile\n";
+      # Attempt download
+      my $req = HTTP::Request->new(GET => "https://".$path.$tryFile);
+      my $response = $client->request($req);
+      if ($response->is_success) {
+        print "HTTP: Found! Trying to download: $tryFile\n";
+        open my $handle, '>', $tryFile;
+        binmode $handle;
+        print $handle $response->content;
+        close $handle;
+        print "HTTP: Success! $tryFile downloaded..\n";
+        last;
+      } else {
+        print "HTTP: Request failed\n";
+        print "HTTP: Code - " . $response->code . " Message - " . $response->message . "\n";
+      }
+
+      # If we get here, we need to try the next level of file.
       $level = $level + 1;
       $tryFile = "";
-    }
+    }  
   }
   
   return $tryFile;
@@ -292,7 +391,7 @@ sub get_CODE_ION {
     if($ftp->size($tryFile) > 0) {
       print "Found! Trying to download: $tryFile\n";
       $ftp->get($tryFile);
-      print "Success! $tryFile downloaded..\n";
+      print "Success! ${tryFile} downloaded..\n";
 	  last;
     } else {
       $level = $level + 1;
