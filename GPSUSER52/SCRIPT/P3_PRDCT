@@ -49,6 +49,7 @@ my %igsSvrs = (
   'cddis.nasa.gov' => {"Protocol" => "HTTP", "Path" => "/archive/gnss/products/${wwww}/" }
 );
 
+# The definition of igsSvrs below demonstrates a mix of HTTP and FTP servers
 #my %igsSvrs = (
 #  'cddis.nasa.gov' => {"Protocol" => "HTTP", "Path" => "/archive/gnss/products/${wwww}/" },
 #  'igs.ensg.igs.fr' => {"Protocol" => "FTP", "Path" => "/pub/igs/products/${wwww}/" },
@@ -73,7 +74,7 @@ my $p1c1rp = "P1C1.DCB";
 my $p1p2rp = "P1P2.DCB";
 
 # Local folders to store downloaded files in
-my $igsldr = "$ENV{D}/$v_b/$wwww/";
+my $igsldr = "$ENV{D}/$v_b";
 my $codldr = "$ENV{D}/BSW52";
 
 # Utiliyt variables
@@ -186,7 +187,14 @@ foreach my $igssvr (@keys) {
 #  my $gpsdir = $igsSvrs{$igssvr}{"Path"};
     foreach my $product (@igsPrdcts)
     {
-      $ret = get_IGS_Product($svrProtocol, $client, $gpsdir, $product, $wwwwd);
+      # Deal with any special cases, e.g. Weekly ERP files
+      if ($product eq "erp") {
+        $ret = get_IGS_Product($svrProtocol, $client, $gpsdir, $product, "${wwww}7");
+      }
+      # Deal with the generic cases
+      if ($ret eq "") {
+        $ret = get_IGS_Product($svrProtocol, $client, $gpsdir, $product, $wwwwd);
+      }
       if ($ret ne "") {
         # Rename file to its appropriate "Final" filename.
         switch ($product) {
