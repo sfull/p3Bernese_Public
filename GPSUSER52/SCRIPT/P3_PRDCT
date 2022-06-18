@@ -11,7 +11,7 @@ package P3_PRDCT;
 # Authors :  S Fuller
 # Created :  11-NOV-2020
 #
-# Changes :  See github repo.
+# Changes :  
 #
 # ============================================================================
 use strict;
@@ -44,12 +44,16 @@ my $pwd = "your_CDDIS_password";
 my $cookie_file = "CDDIS_Cookie.txt";
 
 # IGS server and remote folder details
-# You can add new server & combos to the hash if required.
+# You can add new servers to the hash if required.
+# This definition contains only oner server, the CDDIS HTTP server
+# This is the recommended defintion!
 my %igsSvrs = (
   'cddis.nasa.gov' => {"Protocol" => "HTTP", "Path" => "/archive/gnss/products/${wwww}/" }
 );
 
 # The definition of igsSvrs below demonstrates a mix of HTTP and FTP servers
+# You can use this definition if you want to use the old FTP sites as a backup mechanism.
+# We DON"T recommend using this definition
 #my %igsSvrs = (
 #  'cddis.nasa.gov' => {"Protocol" => "HTTP", "Path" => "/archive/gnss/products/${wwww}/" },
 #  'igs.ensg.igs.fr' => {"Protocol" => "FTP", "Path" => "/pub/igs/products/${wwww}/" },
@@ -62,6 +66,7 @@ my $coddir = "/CODE/$yyyy";  # Remote folder for "final" CODE products
 my $coddirrp = "/CODE";      # Remote folder for "rapid, ultra" CODE products
 
 # Desired output file names (IGS Products)
+# Note: Downloaed files (whether Final, Rapid, or Ultra) will be renamed to these filenames.
 my $igssp3 = $v_b.$wwwwd.".SP3.Z";
 my $iglsp3 = "IGL$wwwwd.SP3.Z";
 my $igserp = $v_b.$wwww."7.ERP.Z";
@@ -83,7 +88,6 @@ my $ret = '';
 my @igsPrdcts = ("sp3","erp","clk");
 my @igsPrdctsDone = ();
 
-
 # IGS Products
 # ------------
 print "\n\nGetting IGS Products\n";
@@ -97,7 +101,7 @@ if(!(-d $igsldr)) {
 
 # Change local directory
 chdir $igsldr;
-print "Changed local directory to Bernese datapool ($igsldr)..\n";
+print "Changed local directory to ($igsldr)..\n";
 
 # Loop through the available IGS FTP servers until we have all required products.
 my @keys = keys %igsSvrs;
@@ -116,7 +120,6 @@ foreach my $igssvr (@keys) {
   } else {
     # Setting up for a HTTP connection to CDDIS
     # Original code taken from CDDIS Perl example.
-    #
     # Setup user agent (client)
     $client = LWP::UserAgent->new(
       cookie_jar  => HTTP::Cookies->new(
@@ -184,28 +187,32 @@ foreach my $igssvr (@keys) {
   print "Remote path is: " . $gpsdir . "\n";
 
   # Change to Products directory
-#  my $gpsdir = $igsSvrs{$igssvr}{"Path"};
-    foreach my $product (@igsPrdcts)
-    {
-      # Deal with any special cases, e.g. Weekly ERP files
-      if ($product eq "erp") {
-        $ret = get_IGS_Product($svrProtocol, $client, $gpsdir, $product, "${wwww}7");
-      }
-      # Deal with the generic cases
-      if ($ret eq "") {
-        $ret = get_IGS_Product($svrProtocol, $client, $gpsdir, $product, $wwwwd);
-      }
-      if ($ret ne "") {
-        # Rename file to its appropriate "Final" filename.
-        switch ($product) {
-          case "sp3" { rename $igsldr."/".$ret, $igsldr."/".$igssp3; }
-          case "erp" { rename $igsldr."/".$ret, $igsldr."/".$igserp; }
-          case "clk" { rename $igsldr."/".$ret, $igsldr."/".$igsclk; }
-          else { print "Unrecognised product\n"; }
-        }
-        push(@igsPrdctsDone, $product);
-      }
+  foreach my $product (@igsPrdcts) {
+    # Reset return results
+	$ret = '';
+	
+	# Deal with any special cases, e.g. Weekly ERP files
+    if ($product eq "erp") {
+      $ret = get_IGS_Product($svrProtocol, $client, $gpsdir, $product, "${wwww}7");
     }
+    
+	# Deal with the generic cases
+    if ($ret eq "") {
+      $ret = get_IGS_Product($svrProtocol, $client, $gpsdir, $product, $wwwwd);
+    }
+	
+	# Did we download a file, if so then rename it.
+    if ($ret ne "") {
+      # Rename file to its appropriate "Final" filename.
+      switch ($product) {
+        case "sp3" { rename $igsldr."/".$ret, $igsldr."/".$igssp3; }
+        case "erp" { rename $igsldr."/".$ret, $igsldr."/".$igserp; }
+        case "clk" { rename $igsldr."/".$ret, $igsldr."/".$igsclk; }
+        else { print "Unrecognised product\n"; }
+      }
+      push(@igsPrdctsDone, $product);
+    }
+  }
 
   # Terminate connection
   if ($svrProtocol eq "FTP") {

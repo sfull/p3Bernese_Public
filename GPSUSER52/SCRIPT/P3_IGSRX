@@ -1,0 +1,162 @@
+package P3_IGSRX;
+@ISA = ("RUNBPE");
+# ============================================================================
+#
+# Name    :  P3_IGSRX
+#
+# Purpose :  Obtain Daily IGS RINEX files required for processing.
+#
+#
+# PARAMs  :  
+#
+# Author  :  S. Fuller
+# Created :  13/11/20
+#
+# Changes :  This is the public version, see github repo for changes.
+#
+# ============================================================================
+use strict;
+
+use lib $ENV{BPE};
+use lib "$ENV{X}/EXE";
+
+use JSON;
+use REST::Client;
+use LWP::Simple;
+
+sub run{
+  my $bpe = shift;
+
+# Get variables
+# -------------
+  my ($rnxDir, $rx3Dir, 
+      $ssss, $yy, $mm, $dd, $yyyy, $ddd, 
+      $camp ) =
+  $bpe->getKeys
+     ('V_RNXDIR','V_RX3DIR', 
+      '$S+0', '$Y', '$M', '$D', '$Y+0' , '$+0',
+      'CAMPAIGN');
+
+  # Variables for use with REST API access to Geoscience Australia (GA) data archive
+  my $api_root = 'https://data.gnss.ga.gov.au/api';
+  my $api_client = '';
+
+  # Get a list of the IGS stations you want to download
+  # The stations are obtained from two locations...
+  #  1. A hardcoed list of IGS stations. These will be downloaed
+  #     for EVERY campaign that you process with this script.
+  #  2. A text file (P3_IGSRX) in the campaign folder that contains
+  #     a list of IGS stations. These will only be downloaded for
+  #     the campaign where the file resides.
+  #
+  # Note: The Geoscience Australia data repository (sse $api_root) above
+  # provides access to non-IGS stations as well. You may include these
+  # in your list of stations.
+		
+  # Put your "hardcoded" stations in here. These will be downloaded for EVERY campaign
+  # Station names are NOT case sensitive
+  my @stations = ();     # Example: my @stations = ("HOB2", "mobs", "ALIC", "darw");
+  
+  # Put any campaign specific stations in a text file (P3_IGSRX.TXT) in the
+  # campaign root folder (e.g. $P/EXAMPLE/P3_IGSRX.TXT). These will be added
+  # to those in the hardcoded list.
+  if (open (FH_IN, "<", $ENV{P}."/".${camp}."/P3_IGSRX.TXT")) {
+    while( my $thisLine = <FH_IN>)  {
+	  chomp $thisLine;
+	  if ($thisLine) {
+	    push(@stations, $thisLine);
+	  }
+    }
+    close FH_IN;
+  }
+
+  # Build absolute path to RINEX 2 and RINEX 3 folders in datapool
+  $rnxDir = "$ENV{D}/$rnxDir/" unless $rnxDir eq "";
+  $rx3Dir = "$ENV{D}/$rx3Dir/" unless $rx3Dir eq "";
+  
+  print "\nRINEX 2 Folder: ${rnxDir}\n";
+  print "RINEX 3 Folder: ${rx3Dir}\n\n";
+  
+  if ($rnxDir eq "" && $rx3Dir eq "") { die "No RINEX folders\n"; }
+  
+  # Setup REST Client
+  $api_client = REST::Client->new();
+  $api_client->setHost($api_root);
+  
+  foreach my $stnID ( @stations ) {
+	if ($stnID ne "") {
+	  my $rnxFile = "";
+	  print "Looking for IGS Station: ${stnID}\n";
+      
+	  # Do we have RINEX 3 for this station in the datapool ($D)?
+	  opendir(DH, $rx3Dir);
+	  my @rnxFiles = grep{/^${stnID}\w{5}_R_${yyyy}${ddd}\w{4}_01D_30S_MO\.(crx|rnx)\.gz/i} readdir(DH);
+      foreach my $thisFile (@rnxFiles) {
+        print "Found ${thisFile} locally\n";
+        $rnxFile = $thisFile;
+      }
+	  close DH;
+	  
+	  # Did we find the RINEX 3 file locally?
+	  if ($rnxFile eq "") {
+	    # Do we have RINEX 2 for this station in the datapool ($D)?
+        opendir(DH, $rnxDir);
+	    my @rnxFiles = grep{/^${stnID}${ssss}\.${yy}(o|d)\.(gz|z)/i} readdir(DH);
+        foreach my $thisFile (@rnxFiles) {
+          print "Found ${thisFile} locally\n";
+          $rnxFile = $thisFile;
+        }
+	    close DH;
+	  }
+	  
+	  # If we have not found the RINEX file locally, get it from the internet.
+	  if ($rnxFile eq "") {
+        print "Not found locally, looking for ${stnID} on Geoscience Australia archive\n";
+		
+        # Is the REST Client setup?
+		if ($api_client) {
+		  print "API Setup, looking for files.... \n";
+		  # Prepare the query start and end date/time
+		  my $start_api_date = ${yyyy}.'-'.${mm}.'-'.${dd}.'T00%3A00%3A00Z';
+          my $end_api_date = ${yyyy}.'-'.${mm}.'-'.${dd}.'T23%3A59%3A59Z';
+		  
+          # Try for RINEX 3 from GA Archive
+		  $rnxFile = $rx3Dir;
+          $api_client->GET('/rinexFiles?stationId='.$stnID.'&startDate='.$start_api_date.'&endDate='.$end_api_date.'&filePeriod=01D&fileType=obs&rinexVersion=3');           
+          #print "RINEX 3 file response code:" .$api_client->responseCode(). "\n";
+		  if ($api_client->responseCode() ne '200') {
+		    # Try for RINEX 2 from GA Archive
+            $rnxFile = $rnxDir;
+			$api_client->GET('/rinexFiles?stationId='.$stnID.'&startDate='.$start_api_date.'&endDate='.$end_api_date.'&filePeriod=01D&fileType=obs&rinexVersion=2');           
+            #print "RINEX 2 file response code:" .$api_client->responseCode(). "\n";
+			if ($api_client->responseCode() ne '200') {
+              $rnxFile = "";
+			  print "No RINEX files available for this station in GA Archive\n";
+			}
+		  }
+		  
+		  # If we get to here with a 200 response there's a file to downnload, yay!
+	      if ($api_client->responseCode() eq '200') {
+            my $api_response = from_json($api_client->responseContent());
+            for my $api_file ( @{$api_response})  {
+	          # Look for the station in the return file location
+	          my $remote_file = $api_file->{fileLocation};
+              # print "\n\nRmote File String is:\n" . $remote_file . "\n\n";
+	          if ($remote_file =~ /(?:filename\%3D\%22)(${stnID}.*\.gz)/ip) {
+	            $rnxFile = $rnxFile.$1;
+	            print "Downloading remote file to: ${rnxFile}\n";
+	            my $api_result = getstore($remote_file, $rnxFile);
+                if ($api_result eq '200') {
+					print "Download succeded!\n\n";
+				} else {
+					print "Download Failed!\n\n";
+				}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
