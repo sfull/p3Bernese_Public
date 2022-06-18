@@ -39,6 +39,8 @@ sub run{
 # ---------
 my $ftp = '';
 my $client = '';
+my $usr = "your_CDDIS_username";
+my $pwd = "your_CDDIS_password";
 my $cookie_file = "CDDIS_Cookie.txt";
 
 # IGS server and remote folder details
